@@ -1,0 +1,40 @@
+{
+  "name": "simple-copas",
+  "version": "1.0.0",
+  "description": "Simple pastebin-like application with short URLs using Nanoid",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "pm2:start": "pm2 start index.js --name simple-copas",
+    "pm2:stop": "pm2 stop simple-copas",
+    "pm2:restart": "pm2 restart simple-copas",
+    "pm2:logs": "pm2 logs simple-copas"
+  },
+  "keywords": [
+    "pastebin",
+    "paste",
+    "copas",
+    "short-url",
+    "nanoid",
+    "express"
+  ],
+  "author": "W a N",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^5.2.1",
+    "nanoid": "^5.1.16"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/starmelodic/simple-copas.git"
+  },
+  "bugs": {
+    "url": "https://github.com/starmelodic/simple-copas/issues"
+  },
+  "homepage": "https://github.com/starmelodic/simple-copas#readme"
+}
