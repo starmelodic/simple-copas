@@ -64,10 +64,11 @@ All settings come from environment variables (see [`.env.example`](.env.example)
 | `LEGACY_PASTES_DIR` | `./pastes` | Old `.txt` pastes imported once at boot |
 | `ID_LENGTH` | `6` | Short-link length (6–32) |
 | `MAX_CONTENT_BYTES` | `524288` | Max paste size (512 KiB) |
-| `RATE_LIMIT_MAX` | `30` | Max creates per IP per hour |
+| `RATE_LIMIT_MAX` | `30` | Max creates per client per hour |
+| `RATE_LIMIT_SCOPE` | `ip+ua` (`ip` if `TRUST_PROXY=true`) | Rate-limit key: `ip` or `ip+ua` |
 | `DEFAULT_EXPIRY_DAYS` | `0` | Applied when the client omits `expiresIn` (0 = never) |
 | `MAX_EXPIRY_DAYS` | `365` | Upper bound on expiry |
-| `CLEANUP_INTERVAL_MS` | `600000` | How often expired pastes are purged |
+| `CLEANUP_INTERVAL_MS` | `600000` | How often expired pastes are purged (≤ 0 disables) |
 
 > `npm start` does not load `.env` automatically — export the variables or use
 > `node --env-file=.env index.js` (Node ≥ 20.6).
@@ -75,6 +76,9 @@ All settings come from environment variables (see [`.env.example`](.env.example)
 ## 🛠️ HTTP API
 
 Base URL: `/api`. All responses are JSON unless stated.
+Full reference (all fields, headers, status codes, error table):
+**[docs/API.md](docs/API.md)**. Deployment and operations:
+**[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
 
 ### Create a paste
 
@@ -99,13 +103,13 @@ Accept: application/json
   "id": "V1StGX",
   "title": "Greeting",
   "language": "javascript",
-  "content": "hello world",
   "createdAt": 1736380000000,
   "expiresAt": 1736383600000,
   "views": 0,
   "burnAfterRead": false,
   "size": 11,
   "lines": 1,
+  "content": "hello world",
   "url": "http://localhost:6000/V1StGX",
   "rawUrl": "http://localhost:6000/raw/V1StGX",
   "deleteToken": "…"            // keep it to delete the paste later
@@ -118,6 +122,36 @@ Errors: `400 empty_content`, `400 invalid_expiry`, `413 content_too_large`,
 **Legacy form post** — the same endpoint with
 `Content-Type: application/x-www-form-urlencoded` and a `content` field
 renders the HTML success page (as in v1).
+
+### JavaScript / Node client
+
+`src/client.js` is a zero-dependency wrapper around this API (Node ≥ 20,
+browsers, Deno, Bun — anything with `fetch`):
+
+```js
+import { createClient, CopasError } from "simple-copas/src/client.js";
+
+const copas = createClient({ baseUrl: "http://localhost:6000" });
+
+const paste = await copas.create("npm install && npm start", {
+  title: "Run it",
+  language: "bash",
+  expiresIn: "7d",
+});
+console.log(paste.url);         // share this
+console.log(paste.deleteToken); // keep this to delete later
+
+await copas.createUrl("just the link");     // → string url
+await copas.get(paste.id);                  // → raw text content
+await copas.getMeta(paste.id);              // → full paste object (JSON)
+await copas.recent(10);                     // → metadata list
+await copas.remove(paste.id, paste.deleteToken); // → true
+copas.downloadUrl(paste.id);                // → /raw/:id?download=1
+await copas.health();
+```
+
+Every failure throws `CopasError` with `.status` (e.g. `400`), `.code`
+(e.g. `empty_content`, `invalid_token`, `not_found`) and `.body`.
 
 ### Get a paste
 
@@ -171,6 +205,7 @@ simple-copas/
 ├── src/
 │   ├── app.js            # Express app factory: middleware, security headers, routes
 │   ├── routes.js         # JSON API + raw/download + legacy HTML fallbacks
+│   ├── client.js         # zero-dependency JS client for the HTTP API
 │   ├── store.js          # PasteStore: JSONL persistence, expiry, delete tokens
 │   ├── config.js         # environment configuration
 │   └── utils.js          # escaping, rate limiter, expiry parsing
@@ -180,6 +215,9 @@ simple-copas/
 │   ├── styles.css        # design system, dark/light themes
 │   ├── 404.html          # server-rendered not-found page
 │   └── favicon.svg
+├── docs/
+│   ├── API.md            # full HTTP API reference
+│   └── DEPLOYMENT.md     # config, Docker, PM2, Nginx, ops
 ├── test/api.test.js      # node:test integration suite
 ├── Dockerfile
 ├── docker-compose.yml
@@ -192,13 +230,17 @@ simple-copas/
 Pastes are appended to `data/pastes.jsonl`, one JSON document per line, and
 indexed in memory at boot — reads never hit the disk. View-count updates
 append a small `{id, views}` line; deletes append a tombstone and compact.
-If the file grows, the next write rewrites it without history. To switch to
+The file is compacted at boot, after each delete, and after each expiry
+prune — not after every create. To switch to
 SQLite/Postgres later, only `src/store.js` needs to change.
 
 > The pastes file stores content in plain text, like v1 did. Don't treat
 > this as encrypted storage; put it on a volume you control.
 
 ## 🚀 Deployment
+
+Quick options below; see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the full
+guide (configuration, storage/backup, health checks, troubleshooting).
 
 ### PM2
 
