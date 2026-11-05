@@ -1,12 +1,14 @@
 {
   "name": "simple-copas",
-  "version": "1.0.0",
-  "description": "Simple pastebin-like application with short URLs using Nanoid",
+  "version": "2.0.0",
+  "description": "Pastebin-style app: share text or code with a short link. Zero-config, single-process, JSON API.",
   "main": "index.js",
   "type": "module",
   "scripts": {
     "start": "node index.js",
     "dev": "node --watch index.js",
+    "test": "node --test test/",
+    "test:watch": "node --test --watch test/",
     "pm2:start": "pm2 start index.js --name simple-copas",
     "pm2:stop": "pm2 stop simple-copas",
     "pm2:restart": "pm2 restart simple-copas",
@@ -18,7 +20,8 @@
     "copas",
     "short-url",
     "nanoid",
-    "express"
+    "express",
+    "self-hosted"
   ],
   "author": "W a N",
   "license": "MIT",

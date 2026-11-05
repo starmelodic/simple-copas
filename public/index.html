@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Simple Copas — share text with a short link</title>
+    <meta name="description" content="Paste text, get a short link. No accounts, no clutter." />
+    <meta name="theme-color" content="#4f46e5" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <a href="/" class="brand" data-link>
+          <span class="logo" aria-hidden="true">✂️</span>
+          <span>Simple Copas</span>
+          <span class="ver" id="version-badge">v2</span>
+        </a>
+        <div class="topbar-actions">
+          <button class="btn btn-icon btn-ghost" id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">
+            <span id="theme-icon">🌙</span>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main id="view" aria-live="polite">
+      <div class="center-state">
+        <div class="spinner"></div>
+        <p>Loading…</p>
+      </div>
+    </main>
+
+    <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+
+    <script>
+      // Apply the saved theme before first paint to avoid a flash.
+      (function () {
+        try {
+          var t = localStorage.getItem("copas-theme");
+          if (!t) t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+          document.documentElement.dataset.theme = t;
+        } catch (e) {}
+      })();
+    </script>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

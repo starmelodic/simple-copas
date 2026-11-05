@@ -1,0 +1,21 @@
+services:
+  simple-copas:
+    build: .
+    image: simple-copas:2
+    restart: unless-stopped
+    ports:
+      - "6000:6000"
+    environment:
+      PORT: 6000
+      TRUST_PROXY: "true"
+      MAX_CONTENT_BYTES: "524288"
+      RATE_LIMIT_MAX: "30"
+    volumes:
+      - copas-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:6000/api/health"]
+      interval: 30s
+      timeout: 3s
+
+volumes:
+  copas-data:

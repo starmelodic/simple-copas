@@ -13,6 +13,7 @@ yarn.lock
 
 # Application files
 pastes/
+data/
 *.txt
 *.link
 *.log

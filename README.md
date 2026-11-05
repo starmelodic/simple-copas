@@ -1,175 +1,266 @@
 # 📝 Simple Copas
 
-Simple pastebin-like application with short URLs using Nanoid. Share text quickly with short, memorable URLs.
+Paste text or code, get a short link. Self-hosted, zero-config, single process.
+No accounts — no database server — no build step for the frontend.
+
+**v2** turns the original single-file demo into a complete fullstack app with
+a JSON API, titles, syntax highlighting, expiring links, one-time links,
+delete tokens, rate limiting, and a proper responsive UI.
 
 ## ✨ Features
 
-- 🔗 Short URLs - Uses Nanoid to generate 6-character URLs
-- 📋 Copy to Clipboard - One-click copy URL
-- 🗄️ File-based Storage - Stores pastes as text files
-- 🎨 Clean UI - Modern, responsive design
-- 🚀 Fast & Lightweight - Minimal dependencies
-- 🔒 Secure - HTML escaping to prevent XSS
+| | |
+|---|---|
+| 🔗 **Short URLs** | 6-character Nanoid IDs (`domain.com/abc123`) |
+| 📋 **Copy helpers** | Copy link, copy content, raw view, download as `.txt` |
+| 🎨 **Syntax highlighting** | Language picker + Prism (lazy-loaded) |
+| ⏳ **Expiring pastes** | `10m`, `1h`, `1d`, `7d`, `30d`, or never; auto-pruned |
+| 🔥 **Burn after reading** | Link self-destructs after the first raw read |
+| 🗑️ **Delete tokens** | Only the creator's browser holds the token needed to delete |
+| 🔒 **Safe rendering** | Content escaped client-side *and* server-side; strict CSP |
+| 🚦 **Rate limited** | Per-IP creation limit (default 30/hour) |
+| 📦 **Persistent storage** | Append-only JSONL log + in-memory index |
+| 🌗 **Dark / light theme** | Follows system, toggleable, remembered |
+| 🧪 **Tested** | `node:test` integration suite |
+| 🐳 **Docker ready** | Multi-stage image, healthcheck, compose file |
+| 🔁 **Backward compatible** | Old `GET /:id`, `GET /raw/:id` and form posts still work; legacy `pastes/*.txt` imported on boot |
 
-## 📦 Installation
+## 📦 Quick start
 
-### Prerequisites
-- Node.js >= 20.0.0
-- npm or yarn
+Requires **Node.js ≥ 20**.
 
-### Steps
-
-1. Clone the repository
+```bash
 git clone https://github.com/starmelodic/simple-copas.git
 cd simple-copas
-
-2. Install dependencies
 npm install
-
-3. Start the server
 npm start
+# → http://localhost:6000
+```
 
-4. Open your browser and visit http://localhost:6000
+Development (auto-restart on change):
+
+```bash
+npm run dev
+```
+
+Tests:
+
+```bash
+npm test
+```
+
+## ⚙️ Configuration
+
+All settings come from environment variables (see [`.env.example`](.env.example)):
+
+| Variable | Default | Description |
+|---|---|---|
+| `PORT` | `6000` | HTTP port |
+| `HOST` | `0.0.0.0` | Bind address |
+| `NODE_ENV` | `development` | `production` enables asset caching |
+| `TRUST_PROXY` | `false` | Trust `X-Forwarded-*` (set when behind Nginx) |
+| `BASE_URL` | derived | Absolute URL used in API responses |
+| `DATA_DIR` | `./data` | Storage directory |
+| `LEGACY_PASTES_DIR` | `./pastes` | Old `.txt` pastes imported once at boot |
+| `ID_LENGTH` | `6` | Short-link length (6–32) |
+| `MAX_CONTENT_BYTES` | `524288` | Max paste size (512 KiB) |
+| `RATE_LIMIT_MAX` | `30` | Max creates per IP per hour |
+| `DEFAULT_EXPIRY_DAYS` | `0` | Applied when the client omits `expiresIn` (0 = never) |
+| `MAX_EXPIRY_DAYS` | `365` | Upper bound on expiry |
+| `CLEANUP_INTERVAL_MS` | `600000` | How often expired pastes are purged |
+
+> `npm start` does not load `.env` automatically — export the variables or use
+> `node --env-file=.env index.js` (Node ≥ 20.6).
+
+## 🛠️ HTTP API
+
+Base URL: `/api`. All responses are JSON unless stated.
+
+### Create a paste
+
+```http
+POST /api/pastes
+Content-Type: application/json
+Accept: application/json
+
+{
+  "content": "hello world",
+  "title": "Greeting",          // optional, ≤ 120 chars
+  "language": "javascript",     // optional, used for highlighting
+  "expiresIn": "1h",            // optional: 10m | 1h | 1d | 7d | 30d | never
+  "burnAfterRead": false        // optional
+}
+```
+
+`201 Created`:
+
+```json
+{
+  "id": "V1StGX",
+  "title": "Greeting",
+  "language": "javascript",
+  "content": "hello world",
+  "createdAt": 1736380000000,
+  "expiresAt": 1736383600000,
+  "views": 0,
+  "burnAfterRead": false,
+  "size": 11,
+  "lines": 1,
+  "url": "http://localhost:6000/V1StGX",
+  "rawUrl": "http://localhost:6000/raw/V1StGX",
+  "deleteToken": "…"            // keep it to delete the paste later
+}
+```
+
+Errors: `400 empty_content`, `400 invalid_expiry`, `413 content_too_large`,
+`429 rate_limited` (with `Retry-After`).
+
+**Legacy form post** — the same endpoint with
+`Content-Type: application/x-www-form-urlencoded` and a `content` field
+renders the HTML success page (as in v1).
+
+### Get a paste
+
+```http
+GET /api/pastes/:id        → 200 JSON (paste + content) | 404
+GET /raw/:id               → 200 text/plain            | 404
+GET /raw/:id?download=1    → text/plain, Content-Disposition: attachment
+```
+
+### Delete a paste
+
+```http
+DELETE /api/pastes/:id
+X-Delete-Token: <deleteToken>
+```
+
+`200 {"deleted":true,"id":"…"}` · `403 invalid_token` · `404 not_found`
+
+### List recent pastes (metadata only — no content, no tokens)
+
+```http
+GET /api/pastes?limit=20   → { "pastes": [ { id, title, language, createdAt, expiresAt, views, size, lines, burnAfterRead } ] }
+```
+
+### Health
+
+```http
+GET /api/health            → { status, version, pastes, uptime }
+```
+
+### Examples
+
+```bash
+# create
+curl -s -X POST localhost:6000/api/pastes \
+  -H 'Content-Type: application/json' \
+  -d '{"content":"npm install && npm start","language":"bash","expiresIn":"7d"}'
+
+# read raw
+curl localhost:6000/raw/V1StGX
+
+# delete
+curl -X DELETE localhost:6000/api/pastes/V1StGX -H 'X-Delete-Token: <token>'
+```
+
+## 📁 Project structure
+
+```
+simple-copas/
+├── index.js              # entry point: starts the server
+├── src/
+│   ├── app.js            # Express app factory: middleware, security headers, routes
+│   ├── routes.js         # JSON API + raw/download + legacy HTML fallbacks
+│   ├── store.js          # PasteStore: JSONL persistence, expiry, delete tokens
+│   ├── config.js         # environment configuration
+│   └── utils.js          # escaping, rate limiter, expiry parsing
+├── public/               # frontend (no build step)
+│   ├── index.html        # app shell
+│   ├── app.js            # client router, create/view/delete views
+│   ├── styles.css        # design system, dark/light themes
+│   ├── 404.html          # server-rendered not-found page
+│   └── favicon.svg
+├── test/api.test.js      # node:test integration suite
+├── Dockerfile
+├── docker-compose.yml
+└── data/                 # created at runtime (git-ignored)
+    └── pastes.jsonl
+```
+
+### How storage works
+
+Pastes are appended to `data/pastes.jsonl`, one JSON document per line, and
+indexed in memory at boot — reads never hit the disk. View-count updates
+append a small `{id, views}` line; deletes append a tombstone and compact.
+If the file grows, the next write rewrites it without history. To switch to
+SQLite/Postgres later, only `src/store.js` needs to change.
+
+> The pastes file stores content in plain text, like v1 did. Don't treat
+> this as encrypted storage; put it on a volume you control.
 
 ## 🚀 Deployment
 
-### Using PM2 (Recommended for Production)
+### PM2
 
-Install PM2 globally:
+```bash
 npm install -g pm2
+npm run pm2:start      # or: pm2 start index.js --name simple-copas
+pm2 save
+```
 
-Start the application:
-pm2 start index.js --name simple-copas
+### Docker
 
-View logs:
-pm2 logs simple-copas
+```bash
+docker compose up -d --build     # http://localhost:6000, data in a named volume
+# or
+docker build -t simple-copas .
+docker run -d -p 6000:6000 -v copas-data:/data --name simple-copas simple-copas
+```
 
-Restart application:
-pm2 restart simple-copas
+### Nginx reverse proxy
 
-Stop application:
-pm2 stop simple-copas
-
-### Using Nginx as Reverse Proxy
-
-Create Nginx configuration:
+```nginx
 server {
-    listen 80;
-    server_name your-domain.com;
+    listen 443 ssl http2;
+    server_name paste.example.com;
+
+    # must be >= the app's MAX_CONTENT_BYTES + overhead
+    client_max_body_size 1m;
 
     location / {
-        proxy_pass http://localhost:6000;
+        proxy_pass http://127.0.0.1:6000;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
         proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
+```
 
-### Using Docker
-
-Create Dockerfile:
-FROM node:18-alpine
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci --only=production
-COPY . .
-EXPOSE 6000
-CMD ["node", "index.js"]
-
-Build and run:
-docker build -t simple-copas .
-docker run -p 6000:6000 -v $(pwd)/pastes:/app/pastes simple-copas
-
-## 📁 Project Structure
-
-simple-copas/
-├── index.js          # Main application file
-├── package.json      # Dependencies and scripts
-├── README.md         # Documentation
-├── .gitignore        # Git ignore file
-└── pastes/           # Saved paste files (auto-created)
-    ├── abc123.txt    # Paste content
-    └── xyz789.txt    # Paste content
-
-## 🔧 Configuration
-
-### Changing Port
-Edit the PORT variable in index.js:
-const PORT = 6000; // Change to your preferred port
-
-### Changing URL Length
-Modify the Nanoid length in generateShortId() function:
-function generateShortId() {
-  return nanoid(6); // Change 6 to desired length
-}
-
-## 🛠️ API Endpoints
-
-Method | Endpoint | Description
-GET    | /        | Home page
-POST   | /paste   | Create new paste
-GET    | /:id     | View paste
-GET    | /raw/:id | View raw paste
-
-### API Usage Example
-
-Create a paste:
-curl -X POST http://localhost:6000/paste -d "content=Hello World" -H "Content-Type: application/x-www-form-urlencoded"
-
-Get paste content:
-curl http://localhost:6000/abc123
-
-Get raw content:
-curl http://localhost:6000/raw/abc123
+Run the app with `TRUST_PROXY=true` so rate limiting sees real client IPs.
 
 ## 🧪 Testing
 
-Test with curl:
-curl -X POST http://localhost:6000/paste -d "content=Test paste"
+```bash
+npm test
+```
 
-Test with httpie:
-http POST http://localhost:6000/paste content="Test paste"
+The suite boots the app on an ephemeral port with a temporary data directory
+and covers creation, validation, size limits, expiry, deletion auth,
+burn-after-reading, path-traversal attempts, HTML escaping, persistence across
+restarts, rate limiting, and security headers.
 
-## 🐛 Troubleshooting
+## 🔐 Security notes
 
-### Port already in use
-Find process using port:
-lsof -i :6000
-
-Kill process:
-kill -9 [PID]
-
-### Permission denied
-Make sure pastes directory has write permissions:
-chmod 755 pastes
-
-### Module not found
-Clear npm cache and reinstall:
-npm cache clean --force
-rm -rf node_modules package-lock.json
-npm install
+- Stored content is never injected into HTML unescaped. The SPA escapes on
+  render; the legacy form fallback escapes server-side.
+- Paste IDs are validated against `^[A-Za-z0-9_-]{4,32}$` before any lookup,
+  closing the path-traversal bug in v1's `/raw/:id`.
+- Raw responses get `nosniff` and a sandboxing CSP.
+- Delete tokens are 128-bit random and compared in constant time.
+- Request bodies are capped at `MAX_CONTENT_BYTES` + overhead.
 
 ## 📝 License
 
-MIT License - see LICENSE file for details
-
-## 👤 Author
-
-Your Name
-GitHub: @starmelodic
-
-## ⭐ Support
-
-Give a star if this project helped you!
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the project
-2. Create your feature branch (git checkout -b feature/AmazingFeature)
-3. Commit your changes (git commit -m 'Add some AmazingFeature')
-4. Push to the branch (git push origin feature/AmazingFeature)
-5. Open a Pull Request
+MIT © W a N
