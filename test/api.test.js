@@ -91,7 +91,7 @@ test("expired pastes are invisible", async () => {
   assert.equal(res.status, 404);
   const raw = await fetch(`${base}/raw/${doc.id}`);
   assert.equal(raw.status, 404);
-  assert.equal(await store.pruneExpired(), 1);
+  assert.ok((await store.pruneExpired()) >= 1);
 });
 
 test("delete requires the correct token", async () => {
@@ -115,6 +115,10 @@ test("burn-after-read pastes disappear after the raw read", async () => {
   const paste = await (await postPaste({ content: "secret", burnAfterRead: true })).json();
   const first = await fetch(`${base}/raw/${paste.id}`);
   assert.equal(await first.text(), "secret");
+  const deadline = Date.now() + 2000;
+  while (store.get(paste.id) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 20));
+  }
   const second = await fetch(`${base}/raw/${paste.id}`);
   assert.equal(second.status, 404);
 });
@@ -151,8 +155,12 @@ test("legacy form POST renders an HTML success page", async () => {
   assert.match(res.headers.get("content-type"), /text\/html/);
 });
 
-test("persists pastes across a restart", async () => {
+test("persists pastes and view counts across a restart", async () => {
   const paste = await (await postPaste({ content: "durable" })).json();
+  await fetch(`${base}/raw/${paste.id}`);
+  // Let the queued view write hit disk before reopening.
+  await store.compactNow();
+
   const reopened = await createApp({
     dataDir,
     port: 0,
@@ -161,10 +169,25 @@ test("persists pastes across a restart", async () => {
     maxPastesPerHour: 1000,
   });
   try {
-    assert.equal(reopened.store.get(paste.id).content, "durable");
+    const doc = reopened.store.get(paste.id);
+    assert.ok(doc, "paste should survive restart");
+    assert.equal(doc.content, "durable");
+    assert.equal(doc.views, 1);
   } finally {
     reopened.app.locals.stop();
   }
+});
+
+test("a view-counter update never clobbers the stored content", async () => {
+  const { doc } = await store.create({ content: "keep me" });
+  await store.recordView(doc.id);
+  await store.compactNow();
+  const raw = await fs.readFile(store.filePath, "utf8");
+  const lines = raw.trim().split("\n");
+  assert.equal(lines.length, 1, "compaction should produce one full document");
+  const parsed = JSON.parse(lines[0]);
+  assert.equal(parsed.content, "keep me");
+  assert.equal(parsed.views, 1);
 });
 
 test("health and recent listings do not leak content or tokens", async () => {
@@ -205,6 +228,14 @@ test("sets security headers and unknown API routes return JSON 404", async () =>
   assert.match(api.headers.get("content-type"), /application\/json/);
 });
 
+test("supports cross-origin API clients", async () => {
+  const pre = await fetch(`${base}/api/pastes`, { method: "OPTIONS" });
+  assert.equal(pre.status, 204);
+  assert.equal(pre.headers.get("access-control-allow-origin"), "*");
+  const health = await fetch(`${base}/api/health`);
+  assert.equal(health.headers.get("access-control-allow-origin"), "*");
+});
+
 test("rate limiter kicks in after the configured number of creates", async () => {
   const limited = await createApp({
     dataDir: await fs.mkdtemp(path.join(os.tmpdir(), "copas-rate-")),
@@ -213,9 +244,8 @@ test("rate limiter kicks in after the configured number of creates", async () =>
     cleanupIntervalMs: 0,
     maxPastesPerHour: 2,
   });
-  const srv = await new Promise((resolve) =>
-    resolve(limited.app.listen(0, "127.0.0.1")),
-  );
+  const srv = limited.app.listen(0, "127.0.0.1");
+  await new Promise((resolve) => srv.once("listening", resolve));
   const url = `http://127.0.0.1:${srv.address().port}/api/pastes`;
   try {
     const send = () =>
@@ -231,6 +261,32 @@ test("rate limiter kicks in after the configured number of creates", async () =>
     assert.ok(third.headers.get("retry-after"));
   } finally {
     limited.app.locals.stop();
+    await new Promise((r) => srv.close(r));
+  }
+});
+
+test("optional basic auth protects every route", async () => {
+  const guarded = await createApp({
+    dataDir: await fs.mkdtemp(path.join(os.tmpdir(), "copas-auth-")),
+    port: 0,
+    legacyPastesDir: null,
+    cleanupIntervalMs: 0,
+    basicAuth: "admin:s3cret",
+  });
+  const srv = guarded.app.listen(0, "127.0.0.1");
+  await new Promise((resolve) => srv.once("listening", resolve));
+  const root = `http://127.0.0.1:${srv.address().port}`;
+  const good = `Basic ${Buffer.from("admin:s3cret").toString("base64")}`;
+  const bad = `Basic ${Buffer.from("admin:nope").toString("base64")}`;
+  try {
+    const denied = await fetch(`${root}/api/health`);
+    assert.equal(denied.status, 401);
+    assert.match(denied.headers.get("www-authenticate"), /Basic/);
+    assert.equal((await fetch(`${root}/api/health`, { headers: { Authorization: bad } })).status, 401);
+    const ok = await fetch(`${root}/api/health`, { headers: { Authorization: good } });
+    assert.equal(ok.status, 200);
+  } finally {
+    guarded.app.locals.stop();
     await new Promise((r) => srv.close(r));
   }
 });

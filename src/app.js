@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import express from "express";
 import path from "node:path";
 import { PasteStore, migrateLegacyPastes } from "./store.js";
@@ -35,6 +36,7 @@ export async function createApp(overrides = {}) {
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Referrer-Policy", "no-referrer-when-downgrade");
     res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
     res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
     res.setHeader(
       "Content-Security-Policy",
@@ -48,10 +50,23 @@ export async function createApp(overrides = {}) {
         "frame-ancestors 'none'",
         "base-uri 'self'",
         "form-action 'self'",
+        "object-src 'none'",
       ].join("; "),
     );
+    if (config.trustProxy) {
+      res.setHeader("Strict-Transport-Security", "max-age=15552000");
+    }
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Expose-Headers", "RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset, Retry-After");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Delete-Token");
+    res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, POST, DELETE, OPTIONS");
+    if (req.method === "OPTIONS") return res.status(204).end();
     next();
   });
+
+  if (config.basicAuth) {
+    app.use(basicAuth(config.basicAuth));
+  }
 
   app.use(express.json({ limit: `${Math.ceil(config.maxContentBytes / 1024) + 16}kb` }));
   app.use(
@@ -79,6 +94,11 @@ export async function createApp(overrides = {}) {
       index: false,
       maxAge: config.nodeEnv === "production" ? "1h" : 0,
       etag: true,
+      setHeaders(res, filePath) {
+        // The SPA reuses file names across releases; never let a stale
+        // app.js outlive an upgrade.
+        if (/\.(?:js|css|html)$/.test(filePath)) res.setHeader("Cache-Control", "no-cache");
+      },
     }),
   );
 
@@ -87,6 +107,7 @@ export async function createApp(overrides = {}) {
 
   // SPA entry points. The client router reads `location.pathname`.
   app.get(["/", "/p/:id"], (req, res) => {
+    res.setHeader("Cache-Control", "no-cache");
     res.sendFile(path.join(config.publicDir, "index.html"));
   });
 
@@ -96,6 +117,7 @@ export async function createApp(overrides = {}) {
     if (!isPasteId(id) || !store.get(id)) {
       return res.status(404).sendFile(path.join(config.publicDir, "404.html"));
     }
+    res.setHeader("Cache-Control", "no-cache");
     res.sendFile(path.join(config.publicDir, "index.html"));
   });
 
@@ -122,13 +144,47 @@ export async function createApp(overrides = {}) {
   };
 
   if (config.cleanupIntervalMs > 0) {
-    app.locals.cleanupTimer = setInterval(() => {
-      store.pruneExpired().then((n) => {
+    let pruning = false;
+    app.locals.cleanupTimer = setInterval(async () => {
+      if (pruning) return; // a slow disk must not pile up overlapping prunes
+      pruning = true;
+      try {
+        const n = await store.pruneExpired();
         if (n > 0) console.log(`🧹 Removed ${n} expired paste(s).`);
-      });
+      } catch (err) {
+        console.error("Failed to prune expired pastes:", err.message);
+      } finally {
+        pruning = false;
+      }
     }, config.cleanupIntervalMs);
     app.locals.cleanupTimer.unref?.();
   }
 
   return { app, store, config };
+}
+
+/**
+ * Optional HTTP Basic auth. Credentials are parsed once and compared in
+ * constant time. Browsers send them on every request after the first prompt.
+ */
+function basicAuth(spec) {
+  const sep = spec.indexOf(":");
+  const user = Buffer.from(sep === -1 ? spec : spec.slice(0, sep));
+  const pass = Buffer.from(sep === -1 ? "" : spec.slice(sep + 1));
+
+  return function basicAuthMiddleware(req, res, next) {
+    const header = req.headers.authorization || "";
+    const [scheme, encoded] = header.split(" ");
+    if (scheme === "Basic" && encoded) {
+      const decoded = Buffer.from(encoded, "base64").toString("utf8");
+      const idx = decoded.indexOf(":");
+      const u = Buffer.from(idx === -1 ? decoded : decoded.slice(0, idx));
+      const p = Buffer.from(idx === -1 ? "" : decoded.slice(idx + 1));
+      const okUser = u.length === user.length && crypto.timingSafeEqual(u, user);
+      const okPass = p.length === pass.length && crypto.timingSafeEqual(p, pass);
+      if (okUser && okPass) return next();
+    }
+    res.setHeader("WWW-Authenticate", 'Basic realm="Simple Copas", charset="UTF-8"');
+    res.status(401).json({ error: "unauthorized", message: "Authentication required." });
+  };
 }

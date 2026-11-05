@@ -1,10 +1,6 @@
 import express from "express";
 import { toPublic } from "./store.js";
-import {
-  baseUrlFor,
-  escapeHtml,
-  parseExpiry,
-} from "./utils.js";
+import { baseUrlFor, escapeHtml, parseExpiry } from "./utils.js";
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{4,32}$/;
 
@@ -33,6 +29,10 @@ function normalizeLanguage(value) {
   return /^[a-z0-9+#._-]{1,32}$/.test(lang) ? lang : null;
 }
 
+function boolLike(value) {
+  return value === true || value === "true" || value === "on" || value === "1";
+}
+
 /**
  * @param {{ store: import("./store.js").PasteStore, config: object, createLimiter: Function }} deps
  */
@@ -42,6 +42,7 @@ export function createRouter({ store, config, createLimiter }) {
   // ------------------------------------------------------------------ API
 
   router.get("/api/health", (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
     res.json({
       status: "ok",
       version: config.version,
@@ -52,6 +53,7 @@ export function createRouter({ store, config, createLimiter }) {
 
   router.get("/api/pastes", (req, res) => {
     const limit = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 20));
+    res.setHeader("Cache-Control", "no-store");
     res.json({ pastes: store.recent(limit) });
   });
 
@@ -95,7 +97,7 @@ export function createRouter({ store, config, createLimiter }) {
       content: rawContent.replace(/\r\n?/g, "\n"),
       language: normalizeLanguage(body.language),
       expiresAt,
-      burnAfterRead: body.burnAfterRead === true || body.burnAfterRead === "on",
+      burnAfterRead: boolLike(body.burnAfterRead),
     });
 
     const base = baseUrlFor(req, config);
@@ -116,6 +118,7 @@ export function createRouter({ store, config, createLimiter }) {
 
   router.get("/api/pastes/:id", (req, res) => {
     const { id } = req.params;
+    res.setHeader("Cache-Control", "no-store");
     if (!isPasteId(id)) return res.status(404).json({ error: "not_found" });
     const doc = store.get(id);
     if (!doc) return res.status(404).json({ error: "not_found", message: "Paste not found or expired." });
@@ -140,23 +143,39 @@ export function createRouter({ store, config, createLimiter }) {
 
   // ----------------------------------------------------------------- pages
 
-  router.get("/raw/:id", async (req, res) => {
+  router.get("/raw/:id", (req, res) => {
     const { id } = req.params;
     if (!isPasteId(id)) return res.status(404).type("text/plain").send("Paste not found");
     const doc = store.get(id);
     if (!doc) return res.status(404).type("text/plain").send("Paste not found");
 
-    await store.recordView(id);
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
-    const download = req.query.download !== undefined;
-    if (download) {
+    res.setHeader("Cache-Control", "no-store");
+    if (req.query.download !== undefined) {
       const safeName = `${id}${doc.title ? "-" + slugify(doc.title) : ""}.txt`;
       res.setHeader("Content-Disposition", `attachment; filename="${safeName}"`);
     }
+
+    // Capture the one-time flag *now*. It is consumed once the content has
+    // actually been flushed to this client, so a client that disconnects
+    // mid-transfer does not destroy the paste.
+    const oneTime = doc.burnAfterRead;
+    if (oneTime) {
+      res.on("finish", () => {
+        store.consumeBurnAfterRead(id).catch((err) => {
+          console.error("Failed to burn paste:", err.message);
+        });
+      });
+    }
+
     res.send(doc.content);
-    if (doc.burnAfterRead) await store.consumeBurnAfterRead(id);
+    store.recordView(id);
+  });
+
+  router.get("/robots.txt", (req, res) => {
+    res.type("text/plain").send("User-agent: *\nDisallow: /api/\nDisallow: /raw/\n");
   });
 
   // Any other /api path is a JSON 404, never the SPA shell.
@@ -190,7 +209,6 @@ function renderCreatedPage({ doc, base, deleteToken }) {
     .short-url { font-size: 1.8em; font-weight: bold; color: #007bff; word-break: break-all; text-decoration: none; }
     .btn { display: inline-block; background: #007bff; color: #fff; padding: 10px 20px; border-radius: 5px; text-decoration: none; margin: 4px 10px 4px 0; border: 0; cursor: pointer; }
     .btn-secondary { background: #6c757d; }
-    .btn-danger { background: #dc3545; }
     code { background: #e9ecef; padding: 2px 6px; border-radius: 3px; word-break: break-all; }
   </style>
 </head>

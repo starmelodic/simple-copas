@@ -19,8 +19,10 @@ export function isSafeRelativeUrl(url) {
 export function baseUrlFor(req, config) {
   if (config.baseUrl) return config.baseUrl.replace(/\/+$/, "");
   const host = req.headers.host || `localhost:${config.port}`;
-  const proto =
-    (config.trustProxy && req.headers["x-forwarded-proto"]) || req.protocol || "http";
+  // Only trust forwarding headers when the operator opted in; otherwise a
+  // client can make the API echo back arbitrary absolute URLs.
+  const forwarded = config.trustProxy ? req.headers["x-forwarded-proto"] : null;
+  const proto = forwarded || req.protocol || "http";
   return `${String(proto).split(",")[0].trim()}://${host}`;
 }
 
@@ -91,7 +93,7 @@ export function parseExpiry(value, { maxDays, now = Date.now() }) {
   if (amount <= 0) return { expiresAt: null };
   const unitMs = match[2] === "m" ? 60_000 : match[2] === "h" ? 3_600_000 : DAY_MS;
   const ms = amount * unitMs;
-  if (ms > maxDays * DAY_MS) {
+  if (maxDays > 0 && ms > maxDays * DAY_MS) {
     return { error: `Expiry cannot exceed ${maxDays} days.` };
   }
   return { expiresAt: now + ms };

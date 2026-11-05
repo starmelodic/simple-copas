@@ -7,15 +7,24 @@ const idAlphabet =
   "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 const randomId = customAlphabet(idAlphabet);
 
+const TMP_SUFFIX = ".tmp";
+
 /**
- * Storage is an append-only JSONL file, loaded into memory on boot and
- * compacted after every write. Every paste lives entirely in memory, so
- * reads never touch the disk; deletions and expiry rewrites go through a
- * single serial queue to keep the log consistent.
+ * Storage is a JSONL log, loaded into memory on boot. The log holds two kinds
+ * of lines:
  *
- * Document shape:
- *   { id, title, content, language, createdAt, expiresAt, views, burnAfterRead,
- *     deleteTokenHash, deleted }
+ *   - a full document  `{ id, title, content, ... }`
+ *   - a mutation        `{ id, views }` or `{ id, deleted: true }`
+ *
+ * Mutations are folded into the in-memory document on load, so a view-count
+ * update never rewrites (or loses) the paste itself. Compaction rewrites the
+ * file from memory.
+ *
+ * Every write goes through one serial queue, and deletes/prunes delete from
+ * memory only after the tombstone has been appended, so a failed write leaves
+ * the store consistent with the file.
+ *
+ * All pastes live in memory, so reads never touch the disk.
  */
 export class PasteStore {
   #queue = Promise.resolve();
@@ -43,32 +52,63 @@ export class PasteStore {
     }
     for (const line of raw.split("\n")) {
       if (!line.trim()) continue;
+      let entry;
       try {
-        const doc = JSON.parse(line);
-        if (doc && typeof doc.id === "string") {
-          this.pastes.set(doc.id, doc);
-        }
+        entry = JSON.parse(line);
       } catch {
-        // Skip corrupted lines rather than failing the whole boot.
+        continue; // Skip corrupted lines rather than failing the whole boot.
       }
-    }
-    // Apply tombstones: `deleted: true` removes the id from the live map.
-    // (Tombstones are written as a separate line with the same id; the
-    // in-memory Map keeps the latest entry, so a tombstone replaces it.)
-    for (const [id, doc] of this.pastes) {
-      if (doc.deleted) this.pastes.delete(id);
+      if (!entry || typeof entry.id !== "string") continue;
+
+      const current = this.pastes.get(entry.id);
+      if (typeof entry.content === "string") {
+        // Full document.
+        this.pastes.set(entry.id, entry);
+      } else if (entry.deleted === true) {
+        this.pastes.delete(entry.id);
+      } else if (current && typeof entry.views === "number") {
+        current.views = entry.views;
+      }
     }
     await this.#compact();
   }
 
+  /**
+   * Rewrite the log atomically. Leftover temp files from a crashed run are
+   * removed too, otherwise a killed process would leak them forever.
+   */
   async #compact() {
     const lines = [];
     for (const doc of this.pastes.values()) {
       lines.push(JSON.stringify(doc));
     }
-    const tmp = `${this.filePath}.${process.pid}.tmp`;
-    await fs.writeFile(tmp, lines.join("\n") + (lines.length ? "\n" : ""));
+    const tmp = `${this.filePath}.${process.pid}${TMP_SUFFIX}`;
+    const handle = await fs.open(tmp, "w");
+    try {
+      await handle.writeFile(lines.join("\n") + (lines.length ? "\n" : ""));
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
     await fs.rename(tmp, this.filePath);
+    await this.#removeStaleTemps();
+  }
+
+  async #removeStaleTemps() {
+    const dir = path.dirname(this.filePath);
+    const base = path.basename(this.filePath);
+    let entries;
+    try {
+      entries = await fs.readdir(dir);
+    } catch {
+      return;
+    }
+    for (const name of entries) {
+      if (name.startsWith(`${base}.`) && name.endsWith(TMP_SUFFIX)) {
+        if (name === `${base}.${process.pid}${TMP_SUFFIX}`) continue;
+        await fs.rm(path.join(dir, name), { force: true }).catch(() => {});
+      }
+    }
   }
 
   /** Force a rewrite of the log from the in-memory state. */
@@ -83,8 +123,8 @@ export class PasteStore {
     return run;
   }
 
-  async #persist(doc) {
-    await fs.appendFile(this.filePath, JSON.stringify(doc) + "\n");
+  async #append(entry) {
+    await fs.appendFile(this.filePath, JSON.stringify(entry) + "\n");
   }
 
   isExpired(doc, now = Date.now()) {
@@ -99,61 +139,65 @@ export class PasteStore {
     return doc;
   }
 
+  /**
+   * Bump a paste's view counter. Best-effort: the in-memory counter is always
+   * exact, the persisted one is retried by the next compaction.
+   */
+  recordView(id) {
+    const doc = this.pastes.get(id);
+    if (!doc) return Promise.resolve();
+    doc.views += 1;
+    return this.#serial(() => this.#append({ id, views: doc.views })).catch((err) => {
+      console.error("Failed to persist view count:", err.message);
+    });
+  }
+
   async create({ title, content, language, expiresAt, burnAfterRead }) {
     return this.#serial(async () => {
-      let id;
-      for (let attempt = 0; attempt < 20; attempt++) {
-        const candidate = this.idLength === 6 ? nanoid(6) : randomId(this.idLength);
-        if (!this.pastes.has(candidate)) {
-          id = candidate;
-          break;
-        }
-      }
-      if (!id) throw new Error("Failed to allocate a unique paste id");
-
-      const now = Date.now();
-      const deleteToken = crypto.randomBytes(16).toString("base64url");
       const doc = {
-        id,
+        id: this.#allocateId(),
         title: title || null,
         content,
         language: language || null,
-        createdAt: now,
+        createdAt: Date.now(),
         expiresAt: expiresAt ?? null,
         views: 0,
         burnAfterRead: Boolean(burnAfterRead),
-        deleteTokenHash: hashToken(deleteToken),
+        deleteTokenHash: null,
       };
-      this.pastes.set(id, doc);
-      await this.#persist(doc);
+      const deleteToken = crypto.randomBytes(16).toString("base64url");
+      doc.deleteTokenHash = hashToken(deleteToken);
+
+      await this.#append(doc);
+      this.pastes.set(doc.id, doc);
       return { doc, deleteToken };
     });
   }
 
-  /**
-   * Increment the view counter. Fire-and-forget from the route's perspective:
-   * the persisted counter is best-effort, the in-memory read is exact.
-   */
-  async recordView(id) {
-    const doc = this.pastes.get(id);
-    if (!doc) return;
-    doc.views += 1;
-    try {
-      await this.#serial(() => this.#persist({ id, views: doc.views }));
-    } catch (err) {
-      console.error("Failed to persist view count:", err.message);
+  #allocateId() {
+    const tries = 20;
+    for (let attempt = 0; attempt < tries; attempt++) {
+      const candidate = this.idLength === 6 ? nanoid(6) : randomId(this.idLength);
+      if (!this.pastes.has(candidate)) return candidate;
     }
+    throw new Error("Failed to allocate a unique paste id");
   }
 
+  /**
+   * Delete a one-time paste. The caller must check `burnAfterRead` first and
+   * must not await this before the content has been sent.
+   */
   async consumeBurnAfterRead(id) {
     const doc = this.pastes.get(id);
-    if (!doc || !doc.burnAfterRead) return;
+    if (!doc || !doc.burnAfterRead) return false;
     await this.#remove(id);
+    return true;
   }
 
   verifyDeleteToken(id, token) {
     const doc = this.pastes.get(id);
     if (!doc || !doc.deleteTokenHash || !token) return false;
+    if (typeof token !== "string") return false;
     const expected = Buffer.from(doc.deleteTokenHash, "hex");
     const actual = Buffer.from(hashToken(token), "hex");
     return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
@@ -166,28 +210,34 @@ export class PasteStore {
   }
 
   async #remove(id) {
-    if (!this.pastes.delete(id)) return;
     await this.#serial(async () => {
-      await this.#persist({ id, deleted: true });
+      if (!this.pastes.has(id)) return;
+      await this.#append({ id, deleted: true });
+      this.pastes.delete(id);
       await this.#compact();
     });
   }
 
   /** Delete expired pastes and compact; returns how many were removed. */
   async pruneExpired(now = Date.now()) {
-    const expired = [];
-    for (const [id, doc] of this.pastes) {
-      if (this.isExpired(doc, now)) expired.push(id);
-    }
-    if (expired.length === 0) return 0;
-    for (const id of expired) this.pastes.delete(id);
-    await this.#serial(() => this.#compact());
-    return expired.length;
+    return this.#serial(async () => {
+      const expired = [];
+      for (const [id, doc] of this.pastes) {
+        if (this.isExpired(doc, now)) expired.push(id);
+      }
+      for (const id of expired) this.pastes.delete(id);
+      if (expired.length === 0) return 0;
+      await this.#compact();
+      return expired.length;
+    });
   }
 
   /** Total number of live, un-expired pastes. */
   size() {
-    return this.pastes.size;
+    const now = Date.now();
+    let n = 0;
+    for (const doc of this.pastes.values()) if (!this.isExpired(doc, now)) n++;
+    return n;
   }
 
   /** Newest-first list of public-facing summaries (no content, no tokens). */
@@ -243,9 +293,10 @@ export async function migrateLegacyPastes(store, dir) {
     const id = entry.name.slice(0, -4);
     if (!/^[A-Za-z0-9_-]{4,32}$/.test(id)) continue;
     if (store.pastes.has(id)) continue;
-    const content = await fs.readFile(path.join(dir, entry.name), "utf8");
-    const stat = await fs.stat(path.join(dir, entry.name));
-    const doc = {
+    const fullPath = path.join(dir, entry.name);
+    const [content, stat] = await Promise.all([fs.readFile(fullPath, "utf8"), fs.stat(fullPath)]);
+    // Insert directly so the recycled id is preserved.
+    store.pastes.set(id, {
       id,
       title: null,
       content,
@@ -255,9 +306,7 @@ export async function migrateLegacyPastes(store, dir) {
       views: 0,
       burnAfterRead: false,
       deleteTokenHash: null,
-    };
-    // Insert directly so the recycled id is preserved.
-    store.pastes.set(id, doc);
+    });
     imported++;
   }
   if (imported > 0) await store.compactNow();

@@ -3,19 +3,38 @@ services:
     build: .
     image: simple-copas:2
     restart: unless-stopped
+    init: true
+    # Behind nginx/traefik/Caddy in front of this service. Bound to loopback
+    # so the app is not exposed directly to the internet.
     ports:
-      - "6000:6000"
+      - "127.0.0.1:6000:6000"
     environment:
+      NODE_ENV: production
       PORT: 6000
+      HOST: 0.0.0.0
       TRUST_PROXY: "true"
+      DATA_DIR: /data
+      LEGACY_PASTES_DIR: "none"
       MAX_CONTENT_BYTES: "524288"
       RATE_LIMIT_MAX: "30"
+      # BASE_URL: https://paste.example.com
+      # BASIC_AUTH: user:password      # optional, protects everything
+    read_only: true
+    tmpfs:
+      - /tmp
     volumes:
       - copas-data:/data
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:6000/api/health"]
       interval: 30s
       timeout: 3s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   copas-data:
