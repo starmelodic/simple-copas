@@ -49,6 +49,19 @@ Tests:
 npm test
 ```
 
+Create a paste from the terminal:
+
+```bash
+npm run paste -- "hello world" --title "Greeting" --language bash --expires 1h
+echo "from stdin" | npm run paste
+COPAS_URL=https://paste.example.com npm run paste -- --file notes.md --language markdown
+```
+
+The output is the paste URL, raw URL and delete token. `npm run paste` talks to
+`COPAS_URL` (default `http://localhost:$PORT`), so the server must be running.
+Run it directly with `node examples/create-paste.mjs --help` for all options
+(`--title`, `--language`, `--expires`, `--burn`, `--file`, stdin).
+
 ## ⚙️ Configuration
 
 All settings come from environment variables (see [`.env.example`](.env.example)):
@@ -59,7 +72,7 @@ All settings come from environment variables (see [`.env.example`](.env.example)
 | `HOST` | `0.0.0.0` | Bind address |
 | `NODE_ENV` | `development` | `production` enables asset caching |
 | `TRUST_PROXY` | `false` | Trust `X-Forwarded-*` (set when behind Nginx) |
-| `BASE_URL` | derived | Absolute URL used in API responses |
+| `BASE_URL` | derived from `Host` | Absolute origin used in API responses (`url`, `rawUrl`). Set it behind a proxy if forwarded headers are not trusted, e.g. `https://paste.example.com`. No trailing slash needed. |
 | `DATA_DIR` | `./data` | Storage directory |
 | `LEGACY_PASTES_DIR` | `./pastes` | Old `.txt` pastes imported once at boot |
 | `ID_LENGTH` | `6` | Short-link length (6–32) |
@@ -215,6 +228,8 @@ simple-copas/
 │   ├── styles.css        # design system, dark/light themes
 │   ├── 404.html          # server-rendered not-found page
 │   └── favicon.svg
+├── examples/
+│   └── create-paste.mjs  # CLI: create a paste from the terminal (npm run paste)
 ├── docs/
 │   ├── API.md            # full HTTP API reference
 │   └── DEPLOYMENT.md     # config, Docker, PM2, Nginx, ops

@@ -53,8 +53,14 @@ export function createRouter({ store, config, createLimiter }) {
 
   router.get("/api/pastes", (req, res) => {
     const limit = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 20));
+    const base = baseUrlFor(req, config);
     res.setHeader("Cache-Control", "no-store");
-    res.json({ pastes: store.recent(limit) });
+    res.json({
+      pastes: store.recent(limit).map((paste) => ({
+        ...paste,
+        url: `${base}/${paste.id}`,
+      })),
+    });
   });
 
   router.post("/api/pastes", createLimiter, async (req, res) => {

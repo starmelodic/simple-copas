@@ -46,6 +46,7 @@ Common fields (`summary`):
 | `burnAfterRead` | boolean | One-time link |
 | `size` | number | UTF-8 byte length of content |
 | `lines` | number | Number of lines (`\n` split) |
+| `url` | string | Absolute share URL for the paste |
 
 Full paste (`GET /api/pastes/:id`) = summary + `content`.
 Create response = summary + `content` + `url`, `rawUrl`, `deleteToken`.
@@ -166,6 +167,7 @@ Token comparison is constant-time.
 ## `GET /api/pastes?limit=N` — recent pastes
 
 Returns metadata only — **no content, no tokens**. Sorted newest-first.
+Each paste summary includes an absolute `url` field for sharing.
 `limit` is clamped to `1–100`, default `20`; non-numeric falls back to `20`.
 
 ```json

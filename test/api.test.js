@@ -200,6 +200,7 @@ test("health and recent listings do not leak content or tokens", async () => {
     assert.equal(p.content, undefined);
     assert.equal(p.deleteToken, undefined);
     assert.equal(p.deleteTokenHash, undefined);
+    assert.equal(p.url, `${base}/${p.id}`);
   }
 });
 

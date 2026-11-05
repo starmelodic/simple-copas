@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node index.js",
     "dev": "node --watch index.js",
+    "paste": "node examples/create-paste.mjs",
     "test": "node --test test/",
     "test:watch": "node --test --watch test/",
     "pm2:start": "pm2 start index.js --name simple-copas",
